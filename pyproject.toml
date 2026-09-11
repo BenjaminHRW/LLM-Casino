@@ -1,0 +1,16 @@
+[project]
+name = "ai-poker-casino"
+version = "0.1.0"
+description = "Local Streamlit dashboard for 3-AI Texas Hold'em hands"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.33.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

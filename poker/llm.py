@@ -10,6 +10,7 @@ import urllib.request
 from typing import Any, Callable
 
 from poker.engine import Decision, Player
+from poker.house import house_decide
 from poker.personas import PlayerConfig, provider_of
 
 ACTION_ALIASES = {
@@ -95,10 +96,7 @@ class LLMClient:
 
     def decide(self, player: Player, view: dict[str, Any]) -> Decision:
         if not (player.api_key or "").strip():
-            raise MissingAPIKey(
-                f"{player.name} needs an API key for {player.model}. "
-                "Paste it in that seat’s sidebar next to the model picker."
-            )
+            return house_decide(player, view, reason="no API key")
         try:
             raw = self._complete(player, view)
             decision = parse_decision(raw, view["legal"])
@@ -106,10 +104,10 @@ class LLMClient:
             if not decision.thought:
                 decision.thought = "Going with the math on this one."
             return decision
-        except (MissingAPIKey, LLMCallError):
-            raise
-        except Exception as exc:  # noqa: BLE001 — surface provider failures in the UI
-            raise LLMCallError(f"{player.name} ({player.model}) failed: {exc}") from exc
+        except LLMCallError:
+            return house_decide(player, view, reason="invalid or failed API")
+        except Exception:  # noqa: BLE001 — seat keeps playing via House LLM
+            return house_decide(player, view, reason="invalid or failed API")
 
     def _complete(self, player: Player, view: dict[str, Any]) -> str:
         system, user = build_prompt(player, view)

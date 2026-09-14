@@ -8,7 +8,7 @@ from typing import Any
 import streamlit as st
 
 from poker.engine import Table
-from poker.llm import LLMCallError, LLMClient, MissingAPIKey, secret_or_env
+from poker.llm import LLMClient, secret_or_env
 from poker.personas import DEFAULT_PLAYERS, MODELS, PlayerConfig, clone_defaults, key_label, provider_of
 from poker.ui import CSS, render_table
 
@@ -58,7 +58,7 @@ def _init_state() -> None:
     if "table" not in st.session_state:
         defaults = clone_defaults()
         st.session_state.table = Table(defaults)
-        st.session_state.status = "Paste an API key next to each seat’s model, then deal a hand."
+        st.session_state.status = "Deal a hand. Empty or invalid API keys use the built-in House LLM."
         for seat, cfg in enumerate(defaults):
             st.session_state[f"p{seat}_name"] = cfg.name
             st.session_state[f"p{seat}_model"] = cfg.model if cfg.model in MODELS else MODELS[0]
@@ -87,7 +87,7 @@ st.markdown(
 
 with st.sidebar:
     st.title("AI Poker Casino")
-    st.caption("3-handed no-limit Hold'em. Each seat is an LLM — pick a model and paste that provider’s API key.")
+    st.caption("3-handed no-limit Hold'em. Paste an API key to use that provider, or leave it blank for the built-in House LLM.")
     sb = st.number_input("Small blind", min_value=1, value=table.small_blind, step=1)
     bb = st.number_input("Big blind", min_value=2, value=table.big_blind, step=1)
     delay = st.slider("Simulation delay (seconds)", 0.1, 2.5, 0.7, 0.1)
@@ -107,7 +107,7 @@ with st.sidebar:
                 key_label(model_now),
                 type="password",
                 key=f"p{seat}_api_key",
-                help="Required. Used only for this seat’s model calls. Not written to disk.",
+                help="Optional. If this is empty or the provider rejects it, this seat uses the built-in House LLM.",
             )
             if provider_of(model_now) == "openai":
                 st.text_input(
@@ -133,23 +133,22 @@ table.big_blind = int(bb)
 table.apply_config(configs, reset_stacks=False)
 client = LLMClient(default_base_url=_env_base_url())
 missing = client.missing_seats(configs)
-ready = not missing
 
 st.title("🃏 AI Poker Casino")
-st.caption("Assign each AI a model and a persona, paste that seat’s API key, then step a hand or run it out live.")
+st.caption("Pick a model and persona per seat. API keys are optional — missing or invalid keys fall back to the built-in House LLM.")
 if missing:
-    st.error(
-        "API keys required for every seat. Add them next to the model picker for: "
+    st.info(
+        "No API key for "
         + ", ".join(missing)
-        + "."
+        + ". Those seats play with the built-in House LLM. Paste a valid key to use the selected cloud model instead."
     )
 else:
-    st.success("All three seats have API keys. Next Turn and Run Simulation will call those models.")
+    st.success("All three seats have API keys. Next Turn and Run Simulation will call those models; a rejected key still falls back to the House LLM.")
 
 b1, b2, b3, b4 = st.columns([1, 1, 1, 2])
 new_hand = b1.button("New Hand", use_container_width=True, type="secondary")
-next_turn = b2.button("Next Turn", use_container_width=True, type="primary", disabled=not ready)
-run_sim = b3.button("Run Simulation", use_container_width=True, type="primary", disabled=not ready)
+next_turn = b2.button("Next Turn", use_container_width=True, type="primary")
+run_sim = b3.button("Run Simulation", use_container_width=True, type="primary")
 
 table_slot = st.empty()
 status_slot = st.empty()
@@ -165,14 +164,6 @@ def paint(snapshot: dict[str, Any] | None = None) -> None:
 paint()
 
 
-def _guard_keys() -> bool:
-    if client.missing_seats(table.players):
-        names = ", ".join(client.missing_seats(table.players))
-        st.session_state.status = f"Add API keys for {names} next to each model, then try again."
-        return False
-    return True
-
-
 if new_hand:
     table.apply_config(configs, reset_stacks=False)
     result = table.start_hand()
@@ -180,51 +171,41 @@ if new_hand:
     st.rerun()
 
 if next_turn:
-    if not _guard_keys():
-        st.rerun()
-    try:
-        if table.phase == "complete":
-            result = table.start_hand()
-        else:
-            actor = table.current_player()
-            if actor and table.phase == "betting":
-                actor.thinking = True
-                st.session_state.status = f"{actor.name} is thinking…"
-                paint()
-                time.sleep(min(0.45, delay))
-            result = table.step(client)
-        st.session_state.status = result.message
-    except (MissingAPIKey, LLMCallError) as exc:
-        st.session_state.status = str(exc)
+    if table.phase == "complete":
+        result = table.start_hand()
+    else:
+        actor = table.current_player()
+        if actor and table.phase == "betting":
+            actor.thinking = True
+            st.session_state.status = f"{actor.name} is thinking…"
+            paint()
+            time.sleep(min(0.45, delay))
+        result = table.step(client)
+    st.session_state.status = result.message
     st.rerun()
 
 if run_sim:
-    if not _guard_keys():
-        st.rerun()
     steps = 0
-    try:
-        if table.phase in {"idle", "complete"}:
-            result = table.start_hand()
-            st.session_state.status = result.message
+    if table.phase in {"idle", "complete"}:
+        result = table.start_hand()
+        st.session_state.status = result.message
+        paint()
+        time.sleep(delay)
+        steps += 1
+    while table.phase != "complete" and steps < MAX_STEPS:
+        actor = table.current_player()
+        if actor and table.phase == "betting":
+            actor.thinking = True
+            st.session_state.status = f"{actor.name} is thinking…"
             paint()
-            time.sleep(delay)
-            steps += 1
-        while table.phase != "complete" and steps < MAX_STEPS:
-            actor = table.current_player()
-            if actor and table.phase == "betting":
-                actor.thinking = True
-                st.session_state.status = f"{actor.name} is thinking…"
-                paint()
-                time.sleep(max(0.15, delay * 0.45))
-            result = table.step(client)
-            st.session_state.status = result.message
-            paint()
-            time.sleep(delay)
-            steps += 1
-        if steps >= MAX_STEPS and table.phase != "complete":
-            st.session_state.status = "Stopped after the safety step limit."
-    except (MissingAPIKey, LLMCallError) as exc:
-        st.session_state.status = str(exc)
+            time.sleep(max(0.15, delay * 0.45))
+        result = table.step(client)
+        st.session_state.status = result.message
+        paint()
+        time.sleep(delay)
+        steps += 1
+    if steps >= MAX_STEPS and table.phase != "complete":
+        st.session_state.status = "Stopped after the safety step limit."
     paint()
 
 st.subheader("Action log")
@@ -239,7 +220,10 @@ else:
 with st.expander("How it works"):
     st.markdown(
         """
-        Each seat needs **its own API key**, pasted next to the model picker.
+        API keys are **optional**. Paste a provider key next to a seat to use that
+        cloud model. If the field is empty, or the key is rejected, that seat
+        plays with the built-in **House LLM** (a local strategy player).
+
         Claude seats use an Anthropic key, Gemini seats use a Gemini key, and
         GPT / Llama / o-series seats use an OpenAI-compatible key (optional base URL
         for Groq, OpenRouter, or Ollama).
